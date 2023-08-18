@@ -87,6 +87,7 @@ macro_rules! get_generator_tag_impl_x {
         let mut i = 0..;
         println!("get_generator_tag_impl_x");
         $(if let (tag, true) = (i.next().unwrap(), stringify!($generator_types) == $generator_name) {
+            println!("generator_name: {}", $generator_name);
             Ok(tag)
         } else)*
         {

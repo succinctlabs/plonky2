@@ -518,10 +518,12 @@ impl<F: RichField + Extendable<D> + Poseidon, const D: usize> SimpleGenerator<F,
     }
 
     fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
+        println!("Serializing PoseidonGenerator");
         dst.write_usize(self.row)
     }
 
     fn deserialize(src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
+        println!("Deserializing PoseidonGenerator");
         let row = src.read_usize()?;
         Ok(Self {
             row,
