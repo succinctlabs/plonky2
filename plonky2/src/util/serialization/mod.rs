@@ -828,9 +828,11 @@ pub trait Read {
     ) -> IoResult<ProverOnlyCircuitData<F, C, D>> {
         let gen_len = self.read_usize()?;
         let mut generators = Vec::with_capacity(gen_len);
-        for _ in 0..gen_len {
+        for i in 0..gen_len {
+            println!("reading generator {}", i);
             generators.push(self.read_generator(generator_serializer, common_data)?);
         }
+        println!("finished reading generators");
         let map_len = self.read_usize()?;
         let mut generator_indices_by_watches = BTreeMap::new();
         for _ in 0..map_len {
