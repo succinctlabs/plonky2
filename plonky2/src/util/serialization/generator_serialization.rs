@@ -62,8 +62,7 @@ macro_rules! read_generator_impl_x {
         let tag = $tag;
         let buf = $buf;
         let mut i = 0..;
-
-
+        println!("read_generator_impl_x");
 
         $(if tag == i.next().unwrap() && $generator_name == stringify!($generator_types) {
             println!("generator_name: {}", $generator_name);
@@ -83,7 +82,9 @@ macro_rules! read_generator_impl_x {
 #[macro_export]
 macro_rules! get_generator_tag_impl_x {
     ($generator:expr, $($generator_types:ty, $generator_name:expr),+) => {{
+
         let mut i = 0..;
+        println!("get_generator_tag_impl_x");
         $(if let (tag, true) = (i.next().unwrap(), stringify!($generator_types) == $generator_name) {
             Ok(tag)
         } else)*
