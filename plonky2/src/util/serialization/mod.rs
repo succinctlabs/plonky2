@@ -203,12 +203,15 @@ pub trait Read {
     /// Reads a Target from `self.`
     #[inline]
     fn read_target(&mut self) -> IoResult<Target> {
+        println!("read is_wire");
         let is_wire = self.read_bool()?;
         if is_wire {
+            println!("is wire, read usize");
             let row = self.read_usize()?;
             let column = self.read_usize()?;
             Ok(Target::wire(row, column))
         } else {
+            println!("is not wire, read usize");
             let index = self.read_usize()?;
             Ok(Target::VirtualTarget { index })
         }

@@ -68,6 +68,7 @@ macro_rules! read_generator_impl_x {
             println!("generator_name: {}", $generator_name);
             let generator =
                 <$generator_types as $crate::iop::generator::SimpleGenerator<F, D>>::deserialize(buf, $common)?;
+            println!("succesfully deserialized {}", $generator_name);
             Ok($crate::iop::generator::WitnessGeneratorRef::<F, D>::new(
                 $crate::iop::generator::SimpleGenerator::<F, D>::adapter(generator),
             ))
