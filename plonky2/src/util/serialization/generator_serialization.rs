@@ -57,6 +57,67 @@ macro_rules! get_generator_tag_impl {
 }
 
 #[macro_export]
+macro_rules! read_generator_impl_x {
+    ($buf:expr, $tag:expr, $common:expr, $($generator_types:ty, $generator_name:expr),+) => {{
+        let tag = $tag;
+        let buf = $buf;
+        let mut i = 0..;
+
+        $(if tag == i.next().unwrap() && $generator_name == stringify!($generator_types) {
+            let generator =
+                <$generator_types as $crate::iop::generator::SimpleGenerator<F, D>>::deserialize(buf, $common)?;
+            Ok($crate::iop::generator::WitnessGeneratorRef::<F, D>::new(
+                $crate::iop::generator::SimpleGenerator::<F, D>::adapter(generator),
+            ))
+        } else)*
+        {
+            Err($crate::util::serialization::IoError)
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! get_generator_tag_impl_x {
+    ($generator:expr, $($generator_types:ty, $generator_name:expr),+) => {{
+        let mut i = 0..;
+        $(if let (tag, true) = (i.next().unwrap(), stringify!($generator_types) == $generator_name) {
+            Ok(tag)
+        } else)*
+        {
+            log::log!(log::Level::Error, "attempted to serialize generator with id {} which is unsupported by this generator serializer", $generator.0.id());
+            Err($crate::util::serialization::IoError)
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! impl_generator_serializer_x {
+    ($target:ty, $($generator_types:ty, $generator_name:expr),+) => {
+        fn read_generator(
+            &self,
+            buf: &mut $crate::util::serialization::Buffer,
+            common: &$crate::plonk::circuit_data::CommonCircuitData<F, D>,
+        ) -> $crate::util::serialization::IoResult<$crate::iop::generator::WitnessGeneratorRef<F, D>> {
+            let tag = $crate::util::serialization::Read::read_u32(buf)?;
+            read_generator_impl_x!(buf, tag, common, $($generator_types, $generator_name),+)
+        }
+
+        fn write_generator(
+            &self,
+            buf: &mut Vec<u8>,
+            generator: &$crate::iop::generator::WitnessGeneratorRef<F, D>,
+            common: &$crate::plonk::circuit_data::CommonCircuitData<F, D>,
+        ) -> $crate::util::serialization::IoResult<()> {
+            let tag = get_generator_tag_impl_x!(generator, $($generator_types, $generator_name),+)?;
+
+            $crate::util::serialization::Write::write_u32(buf, tag)?;
+            generator.0.serialize(buf, common)?;
+            Ok(())
+        }
+    };
+}
+
+#[macro_export]
 /// Macro implementing the `WitnessGeneratorSerializer` trait.
 /// To serialize a list of generators used for a circuit,
 /// this macro should be called with a struct on which to implement
