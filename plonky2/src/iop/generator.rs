@@ -316,10 +316,12 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D> for Ran
     }
 
     fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
+        println!("random value generator: i got serialized");
         dst.write_target(self.target)
     }
 
     fn deserialize(src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
+        println!("random value generator: i got deserialized");
         let target = src.read_target()?;
         Ok(Self { target })
     }
