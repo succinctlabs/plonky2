@@ -924,8 +924,11 @@ pub trait Read {
     >(
         &mut self,
     ) -> IoResult<VerifierOnlyCircuitData<C, D>> {
+        println!("reading usize");
         let height = self.read_usize()?;
+        println!("reading merkle cap");
         let constants_sigmas_cap = self.read_merkle_cap(height)?;
+        println!("reading hash");
         let circuit_digest = self.read_hash::<F, <C as GenericConfig<D>>::Hasher>()?;
         Ok(VerifierOnlyCircuitData {
             constants_sigmas_cap,
