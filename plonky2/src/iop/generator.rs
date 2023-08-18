@@ -394,6 +394,7 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D> for Con
     }
 
     fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
+        println!("constant generator: i got serialized");
         dst.write_usize(self.row)?;
         dst.write_usize(self.constant_index)?;
         dst.write_usize(self.wire_index)?;
@@ -401,6 +402,7 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D> for Con
     }
 
     fn deserialize(src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
+        println!("constant generator: i got deserialized");
         let row = src.read_usize()?;
         let constant_index = src.read_usize()?;
         let wire_index = src.read_usize()?;
