@@ -804,8 +804,11 @@ pub trait Read {
         gate_serializer: &dyn GateSerializer<F, D>,
         generator_serializer: &dyn WitnessGeneratorSerializer<F, D>,
     ) -> IoResult<CircuitData<F, C, D>> {
+        println!("read common circuit data");
         let common = self.read_common_circuit_data(gate_serializer)?;
+        println!("read prover only circuit data");
         let prover_only = self.read_prover_only_circuit_data(generator_serializer, &common)?;
+        println!("read verifier only circuit data");
         let verifier_only = self.read_verifier_only_circuit_data()?;
         Ok(CircuitData {
             prover_only,
