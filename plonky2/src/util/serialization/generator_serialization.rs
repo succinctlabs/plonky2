@@ -63,7 +63,10 @@ macro_rules! read_generator_impl_x {
         let buf = $buf;
         let mut i = 0..;
 
-        $(if tag == i.next().unwrap() {
+
+
+        $(if tag == i.next().unwrap() && $generator_name == stringify!($generator_types) {
+            println!("generator_name: {}", $generator_name);
             let generator =
                 <$generator_types as $crate::iop::generator::SimpleGenerator<F, D>>::deserialize(buf, $common)?;
             Ok($crate::iop::generator::WitnessGeneratorRef::<F, D>::new(
@@ -71,6 +74,7 @@ macro_rules! read_generator_impl_x {
             ))
         } else)*
         {
+            println!("error in read_generator_impl_x");
             Err($crate::util::serialization::IoError)
         }
     }};
