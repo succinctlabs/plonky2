@@ -88,6 +88,7 @@ macro_rules! get_generator_tag_impl_x {
             Ok(tag)
         } else)*
         {
+            println!("attempted to serialize generator with id {} which is unsupported by this generator serializer", $generator.0.id());
             log::log!(log::Level::Error, "attempted to serialize generator with id {} which is unsupported by this generator serializer", $generator.0.id());
             Err($crate::util::serialization::IoError)
         }
