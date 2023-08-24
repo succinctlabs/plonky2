@@ -32,15 +32,20 @@ use crate::config::StarkConfig;
 use crate::cpu::cpu_stark::CpuStark;
 use crate::cross_table_lookup::{verify_cross_table_lookups_circuit, CrossTableLookup};
 use crate::generation::GenerationInputs;
+use crate::get_challenges::observe_public_values_target;
 use crate::keccak::keccak_stark::KeccakStark;
 use crate::keccak_sponge::keccak_sponge_stark::KeccakSpongeStark;
 use crate::logic::LogicStark;
 use crate::memory::memory_stark::MemoryStark;
 use crate::permutation::{get_grand_product_challenge_set_target, GrandProductChallengeSet};
-use crate::proof::StarkProofWithMetadata;
+use crate::proof::{
+    BlockMetadataTarget, PublicValues, PublicValuesTarget, StarkProofWithMetadata, TrieRootsTarget,
+};
 use crate::prover::prove;
 use crate::recursive_verifier::{
-    add_common_recursion_gates, recursive_stark_circuit, PlonkWrapperCircuit, PublicInputs,
+    add_common_recursion_gates, add_virtual_public_values,
+    get_memory_extra_looking_products_circuit, recursive_stark_circuit, set_block_metadata_target,
+    set_public_value_targets, set_trie_roots_target, PlonkWrapperCircuit, PublicInputs,
     StarkWrapperCircuit,
 };
 use crate::stark::Stark;
@@ -81,6 +86,8 @@ where
     /// For each table, various inner circuits may be used depending on the initial table size.
     /// This target holds the index of the circuit (within `final_circuits()`) that was used.
     index_verifier_data: [Target; NUM_TABLES],
+    /// Public inputs containing public values.
+    public_values: PublicValuesTarget,
     /// Public inputs used for cyclic verification. These aren't actually used for EVM root
     /// proofs; the circuit has them just to match the structure of aggregation proofs.
     cyclic_vk: VerifierCircuitTarget,
@@ -104,6 +111,7 @@ where
         for index in self.index_verifier_data {
             buffer.write_target(index)?;
         }
+        self.public_values.to_buffer(buffer)?;
         buffer.write_target_verifier_circuit(&self.cyclic_vk)?;
         Ok(())
     }
@@ -122,12 +130,14 @@ where
         for _ in 0..NUM_TABLES {
             index_verifier_data.push(buffer.read_target()?);
         }
+        let public_values = PublicValuesTarget::from_buffer(buffer)?;
         let cyclic_vk = buffer.read_target_verifier_circuit()?;
 
         Ok(Self {
             circuit,
             proof_with_pis: proof_with_pis.try_into().unwrap(),
             index_verifier_data: index_verifier_data.try_into().unwrap(),
+            public_values,
             cyclic_vk,
         })
     }
@@ -144,6 +154,7 @@ where
     pub circuit: CircuitData<F, C, D>,
     lhs: AggregationChildTarget<D>,
     rhs: AggregationChildTarget<D>,
+    public_values: PublicValuesTarget,
     cyclic_vk: VerifierCircuitTarget,
 }
 
@@ -160,6 +171,7 @@ where
     ) -> IoResult<()> {
         buffer.write_circuit_data(&self.circuit, gate_serializer, generator_serializer)?;
         buffer.write_target_verifier_circuit(&self.cyclic_vk)?;
+        self.public_values.to_buffer(buffer)?;
         self.lhs.to_buffer(buffer)?;
         self.rhs.to_buffer(buffer)?;
         Ok(())
@@ -172,12 +184,14 @@ where
     ) -> IoResult<Self> {
         let circuit = buffer.read_circuit_data(gate_serializer, generator_serializer)?;
         let cyclic_vk = buffer.read_target_verifier_circuit()?;
+        let public_values = PublicValuesTarget::from_buffer(buffer)?;
         let lhs = AggregationChildTarget::from_buffer(buffer)?;
         let rhs = AggregationChildTarget::from_buffer(buffer)?;
         Ok(Self {
             circuit,
             lhs,
             rhs,
+            public_values,
             cyclic_vk,
         })
     }
@@ -208,6 +222,15 @@ impl<const D: usize> AggregationChildTarget<D> {
             evm_proof,
         })
     }
+
+    pub fn public_values<F: RichField + Extendable<D>>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> PublicValuesTarget {
+        let agg_pv = PublicValuesTarget::from_public_inputs(&self.agg_proof.public_inputs);
+        let evm_pv = PublicValuesTarget::from_public_inputs(&self.evm_proof.public_inputs);
+        PublicValuesTarget::select(builder, self.is_agg, agg_pv, evm_pv)
+    }
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -220,6 +243,7 @@ where
     has_parent_block: BoolTarget,
     parent_block_proof: ProofWithPublicInputsTarget<D>,
     agg_root_proof: ProofWithPublicInputsTarget<D>,
+    public_values: PublicValuesTarget,
     cyclic_vk: VerifierCircuitTarget,
 }
 
@@ -238,6 +262,7 @@ where
         buffer.write_target_bool(self.has_parent_block)?;
         buffer.write_target_proof_with_public_inputs(&self.parent_block_proof)?;
         buffer.write_target_proof_with_public_inputs(&self.agg_root_proof)?;
+        self.public_values.to_buffer(buffer)?;
         buffer.write_target_verifier_circuit(&self.cyclic_vk)?;
         Ok(())
     }
@@ -251,12 +276,14 @@ where
         let has_parent_block = buffer.read_target_bool()?;
         let parent_block_proof = buffer.read_target_proof_with_public_inputs()?;
         let agg_root_proof = buffer.read_target_proof_with_public_inputs()?;
+        let public_values = PublicValuesTarget::from_buffer(buffer)?;
         let cyclic_vk = buffer.read_target_verifier_circuit()?;
         Ok(Self {
             circuit,
             has_parent_block,
             parent_block_proof,
             agg_root_proof,
+            public_values,
             cyclic_vk,
         })
     }
@@ -404,6 +431,9 @@ where
             core::array::from_fn(|i| &by_table[i].final_circuits()[0].common);
 
         let mut builder = CircuitBuilder::new(CircuitConfig::standard_recursion_config());
+
+        let public_values = add_virtual_public_values(&mut builder);
+
         let recursive_proofs =
             core::array::from_fn(|i| builder.add_virtual_proof_with_pis(inner_common_data[i]));
         let pis: [_; NUM_TABLES] = core::array::from_fn(|i| {
@@ -420,6 +450,9 @@ where
                 challenger.observe_elements(h);
             }
         }
+
+        observe_public_values_target::<F, C, D>(&mut challenger, &public_values);
+
         let ctl_challenges = get_grand_product_challenge_set_target(
             &mut builder,
             &mut challenger,
@@ -453,11 +486,29 @@ where
             }
         }
 
+        // Extra products to add to the looked last value
+        // Arithmetic, KeccakSponge, Keccak, Logic
+        let mut extra_looking_products =
+            vec![vec![builder.constant(F::ONE); stark_config.num_challenges]; NUM_TABLES - 1];
+
+        // Memory
+        let memory_looking_products = (0..stark_config.num_challenges)
+            .map(|c| {
+                get_memory_extra_looking_products_circuit(
+                    &mut builder,
+                    &public_values,
+                    ctl_challenges.challenges[c],
+                )
+            })
+            .collect_vec();
+        extra_looking_products.push(memory_looking_products);
+
         // Verify the CTL checks.
         verify_cross_table_lookups_circuit::<F, D>(
             &mut builder,
             all_cross_table_lookups(),
             pis.map(|p| p.ctl_zs_last),
+            extra_looking_products,
             stark_config,
         );
 
@@ -501,6 +552,7 @@ where
             circuit: builder.build::<C>(),
             proof_with_pis: recursive_proofs,
             index_verifier_data,
+            public_values,
             cyclic_vk,
         }
     }
@@ -509,9 +561,42 @@ where
         root: &RootCircuitData<F, C, D>,
     ) -> AggregationCircuitData<F, C, D> {
         let mut builder = CircuitBuilder::<F, D>::new(root.circuit.common.config.clone());
+        let public_values = add_virtual_public_values(&mut builder);
         let cyclic_vk = builder.add_verifier_data_public_inputs();
         let lhs = Self::add_agg_child(&mut builder, root);
         let rhs = Self::add_agg_child(&mut builder, root);
+
+        let lhs_public_values = lhs.public_values(&mut builder);
+        let rhs_public_values = rhs.public_values(&mut builder);
+        // Connect all block metadata values.
+        BlockMetadataTarget::connect(
+            &mut builder,
+            public_values.block_metadata,
+            lhs_public_values.block_metadata,
+        );
+        BlockMetadataTarget::connect(
+            &mut builder,
+            public_values.block_metadata,
+            rhs_public_values.block_metadata,
+        );
+        // Connect aggregation `trie_roots_before` with lhs `trie_roots_before`.
+        TrieRootsTarget::connect(
+            &mut builder,
+            public_values.trie_roots_before,
+            lhs_public_values.trie_roots_before,
+        );
+        // Connect aggregation `trie_roots_after` with rhs `trie_roots_after`.
+        TrieRootsTarget::connect(
+            &mut builder,
+            public_values.trie_roots_after,
+            rhs_public_values.trie_roots_after,
+        );
+        // Connect lhs `trie_roots_after` with rhs `trie_roots_before`.
+        TrieRootsTarget::connect(
+            &mut builder,
+            lhs_public_values.trie_roots_after,
+            rhs_public_values.trie_roots_before,
+        );
 
         // Pad to match the root circuit's degree.
         while log2_ceil(builder.num_gates()) < root.circuit.common.degree_bits() {
@@ -523,6 +608,7 @@ where
             circuit,
             lhs,
             rhs,
+            public_values,
             cyclic_vk,
         }
     }
@@ -560,6 +646,7 @@ where
         };
 
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        let public_values = add_virtual_public_values(&mut builder);
         let has_parent_block = builder.add_virtual_bool_target_safe();
         let parent_block_proof = builder.add_virtual_proof_with_pis(&expected_common_data);
         let agg_root_proof = builder.add_virtual_proof_with_pis(&agg.circuit.common);
@@ -582,6 +669,7 @@ where
             has_parent_block,
             parent_block_proof,
             agg_root_proof,
+            public_values,
             cyclic_vk,
         }
     }
@@ -593,7 +681,7 @@ where
         config: &StarkConfig,
         generation_inputs: GenerationInputs,
         timing: &mut TimingTree,
-    ) -> anyhow::Result<ProofWithPublicInputs<F, C, D>> {
+    ) -> anyhow::Result<(ProofWithPublicInputs<F, C, D>, PublicValues)> {
         let all_proof = prove::<F, C, D>(all_stark, config, generation_inputs, timing)?;
         let mut root_inputs = PartialWitness::new();
 
@@ -601,7 +689,16 @@ where
             let stark_proof = &all_proof.stark_proofs[table];
             let original_degree_bits = stark_proof.proof.recover_degree_bits(config);
             let table_circuits = &self.by_table[table];
-            let shrunk_proof = table_circuits.by_stark_size[&original_degree_bits]
+            let shrunk_proof = table_circuits
+                .by_stark_size
+                .get(&original_degree_bits)
+                .ok_or_else(|| {
+                    anyhow::Error::msg(format!(
+                        "Missing preprocessed circuits for {:?} table with size {}.",
+                        Table::all()[table],
+                        original_degree_bits,
+                    ))
+                })?
                 .shrink(stark_proof, &all_proof.ctl_challenges)?;
             let index_verifier_data = table_circuits
                 .by_stark_size
@@ -620,7 +717,15 @@ where
             &self.aggregation.circuit.verifier_only,
         );
 
-        self.root.circuit.prove(root_inputs)
+        set_public_value_targets(
+            &mut root_inputs,
+            &self.root.public_values,
+            &all_proof.public_values,
+        );
+
+        let root_proof = self.root.circuit.prove(root_inputs)?;
+
+        Ok((root_proof, all_proof.public_values))
     }
 
     pub fn verify_root(&self, agg_proof: ProofWithPublicInputs<F, C, D>) -> anyhow::Result<()> {
@@ -633,7 +738,8 @@ where
         lhs_proof: &ProofWithPublicInputs<F, C, D>,
         rhs_is_agg: bool,
         rhs_proof: &ProofWithPublicInputs<F, C, D>,
-    ) -> anyhow::Result<ProofWithPublicInputs<F, C, D>> {
+        public_values: PublicValues,
+    ) -> anyhow::Result<(ProofWithPublicInputs<F, C, D>, PublicValues)> {
         let mut agg_inputs = PartialWitness::new();
 
         agg_inputs.set_bool_target(self.aggregation.lhs.is_agg, lhs_is_agg);
@@ -649,7 +755,25 @@ where
             &self.aggregation.circuit.verifier_only,
         );
 
-        self.aggregation.circuit.prove(agg_inputs)
+        set_block_metadata_target(
+            &mut agg_inputs,
+            &self.aggregation.public_values.block_metadata,
+            &public_values.block_metadata,
+        );
+
+        set_trie_roots_target(
+            &mut agg_inputs,
+            &self.aggregation.public_values.trie_roots_before,
+            &public_values.trie_roots_before,
+        );
+        set_trie_roots_target(
+            &mut agg_inputs,
+            &self.aggregation.public_values.trie_roots_after,
+            &public_values.trie_roots_after,
+        );
+
+        let aggregation_proof = self.aggregation.circuit.prove(agg_inputs)?;
+        Ok((aggregation_proof, public_values))
     }
 
     pub fn verify_aggregation(
@@ -668,7 +792,8 @@ where
         &self,
         opt_parent_block_proof: Option<&ProofWithPublicInputs<F, C, D>>,
         agg_root_proof: &ProofWithPublicInputs<F, C, D>,
-    ) -> anyhow::Result<ProofWithPublicInputs<F, C, D>> {
+        public_values: PublicValues,
+    ) -> anyhow::Result<(ProofWithPublicInputs<F, C, D>, PublicValues)> {
         let mut block_inputs = PartialWitness::new();
 
         block_inputs.set_bool_target(
@@ -694,7 +819,25 @@ where
         block_inputs
             .set_verifier_data_target(&self.block.cyclic_vk, &self.block.circuit.verifier_only);
 
-        self.block.circuit.prove(block_inputs)
+        set_block_metadata_target(
+            &mut block_inputs,
+            &self.block.public_values.block_metadata,
+            &public_values.block_metadata,
+        );
+
+        set_trie_roots_target(
+            &mut block_inputs,
+            &self.block.public_values.trie_roots_before,
+            &public_values.trie_roots_before,
+        );
+        set_trie_roots_target(
+            &mut block_inputs,
+            &self.block.public_values.trie_roots_after,
+            &public_values.trie_roots_after,
+        );
+
+        let block_proof = self.block.circuit.prove(block_inputs)?;
+        Ok((block_proof, public_values))
     }
 
     pub fn verify_block(&self, block_proof: &ProofWithPublicInputs<F, C, D>) -> anyhow::Result<()> {

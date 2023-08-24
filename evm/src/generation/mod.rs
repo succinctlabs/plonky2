@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use eth_trie_utils::partial_trie::HashedPartialTrie;
+use eth_trie_utils::partial_trie::{HashedPartialTrie, PartialTrie};
 use ethereum_types::{Address, BigEndianHash, H256, U256};
 use plonky2::field::extension::Extendable;
 use plonky2::field::polynomial::PolynomialValues;
@@ -22,6 +22,7 @@ use crate::generation::outputs::{get_outputs, GenerationOutputs};
 use crate::generation::state::GenerationState;
 use crate::memory::segments::Segment;
 use crate::proof::{BlockMetadata, PublicValues, TrieRoots};
+use crate::util::h2u;
 use crate::witness::memory::{MemoryAddress, MemoryChannel};
 use crate::witness::transition::transition;
 
@@ -38,8 +39,9 @@ use crate::witness::util::mem_write_log;
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub struct GenerationInputs {
     pub signed_txns: Vec<Vec<u8>>,
-
     pub tries: TrieInputs,
+    /// Expected trie roots after the transactions are executed.
+    pub trie_roots_after: TrieRoots,
 
     /// Mapping between smart contract code hashes and the contract byte code.
     /// All account smart contracts that are invoked will have an entry present.
@@ -74,10 +76,13 @@ pub struct TrieInputs {
     pub storage_tries: Vec<(H256, HashedPartialTrie)>,
 }
 
-fn apply_metadata_memops<F: RichField + Extendable<D>, const D: usize>(
+fn apply_metadata_and_tries_memops<F: RichField + Extendable<D>, const D: usize>(
     state: &mut GenerationState<F>,
-    metadata: &BlockMetadata,
+    inputs: &GenerationInputs,
 ) {
+    let metadata = &inputs.block_metadata;
+    let tries = &inputs.tries;
+    let trie_roots_after = &inputs.trie_roots_after;
     let fields = [
         (
             GlobalMetadata::BlockBeneficiary,
@@ -89,6 +94,30 @@ fn apply_metadata_memops<F: RichField + Extendable<D>, const D: usize>(
         (GlobalMetadata::BlockGasLimit, metadata.block_gaslimit),
         (GlobalMetadata::BlockChainId, metadata.block_chain_id),
         (GlobalMetadata::BlockBaseFee, metadata.block_base_fee),
+        (
+            GlobalMetadata::StateTrieRootDigestBefore,
+            h2u(tries.state_trie.hash()),
+        ),
+        (
+            GlobalMetadata::TransactionTrieRootDigestBefore,
+            h2u(tries.transactions_trie.hash()),
+        ),
+        (
+            GlobalMetadata::ReceiptTrieRootDigestBefore,
+            h2u(tries.receipts_trie.hash()),
+        ),
+        (
+            GlobalMetadata::StateTrieRootDigestAfter,
+            h2u(trie_roots_after.state_root),
+        ),
+        (
+            GlobalMetadata::TransactionTrieRootDigestAfter,
+            h2u(trie_roots_after.transactions_root),
+        ),
+        (
+            GlobalMetadata::ReceiptTrieRootDigestAfter,
+            h2u(trie_roots_after.receipts_root),
+        ),
     ];
 
     let channel = MemoryChannel::GeneralPurpose(0);
@@ -105,7 +134,7 @@ fn apply_metadata_memops<F: RichField + Extendable<D>, const D: usize>(
     state.traces.memory_ops.extend(ops);
 }
 
-pub(crate) fn generate_traces<F: RichField + Extendable<D>, const D: usize>(
+pub fn generate_traces<F: RichField + Extendable<D>, const D: usize>(
     all_stark: &AllStark<F, D>,
     inputs: GenerationInputs,
     config: &StarkConfig,
@@ -117,7 +146,7 @@ pub(crate) fn generate_traces<F: RichField + Extendable<D>, const D: usize>(
 )> {
     let mut state = GenerationState::<F>::new(inputs.clone(), &KERNEL.code);
 
-    apply_metadata_memops(&mut state, &inputs.block_metadata);
+    apply_metadata_and_tries_memops(&mut state, &inputs);
 
     generate_bootstrap_kernel::<F>(&mut state);
 

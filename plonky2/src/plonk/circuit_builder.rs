@@ -244,7 +244,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         self.lut_to_lookups[lut_index].push((looking_in, looking_out));
     }
 
-    pub fn num_luts(&mut self) -> usize {
+    pub fn num_luts(&self) -> usize {
         self.lut_to_lookups.len()
     }
 
@@ -321,6 +321,12 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let t = self.add_virtual_target();
         self.register_public_input(t);
         t
+    }
+
+    pub fn add_virtual_public_input_arr<const N: usize>(&mut self) -> [Target; N] {
+        let ts = [0; N].map(|_| self.add_virtual_target());
+        self.register_public_inputs(&ts);
+        ts
     }
 
     pub fn add_virtual_verifier_data(&mut self, cap_height: usize) -> VerifierCircuitTarget {

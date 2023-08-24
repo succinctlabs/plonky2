@@ -1,6 +1,7 @@
 use std::any::type_name;
 
 use anyhow::{ensure, Result};
+use ethereum_types::U256;
 use plonky2::field::extension::{Extendable, FieldExtension};
 use plonky2::field::types::Field;
 use plonky2::fri::verifier::verify_fri_proof;
@@ -8,21 +9,25 @@ use plonky2::hash::hash_types::RichField;
 use plonky2::plonk::config::GenericConfig;
 use plonky2::plonk::plonk_common::reduce_with_powers;
 
-use crate::all_stark::{AllStark, Table};
+use crate::all_stark::{AllStark, Table, NUM_TABLES};
 use crate::arithmetic::arithmetic_stark::ArithmeticStark;
 use crate::config::StarkConfig;
 use crate::constraint_consumer::ConstraintConsumer;
 use crate::cpu::cpu_stark::CpuStark;
+use crate::cpu::kernel::constants::global_metadata::GlobalMetadata;
 use crate::cross_table_lookup::{verify_cross_table_lookups, CtlCheckVars};
 use crate::keccak::keccak_stark::KeccakStark;
 use crate::keccak_sponge::keccak_sponge_stark::KeccakSpongeStark;
 use crate::logic::LogicStark;
 use crate::memory::memory_stark::MemoryStark;
-use crate::permutation::PermutationCheckVars;
+use crate::memory::segments::Segment;
+use crate::memory::VALUE_LIMBS;
+use crate::permutation::{GrandProductChallenge, PermutationCheckVars};
 use crate::proof::{
-    AllProof, AllProofChallenges, StarkOpeningSet, StarkProof, StarkProofChallenges,
+    AllProof, AllProofChallenges, PublicValues, StarkOpeningSet, StarkProof, StarkProofChallenges,
 };
 use crate::stark::Stark;
+use crate::util::h2u;
 use crate::vanishing_poly::eval_vanishing_poly;
 use crate::vars::StarkEvaluationVars;
 
@@ -106,11 +111,116 @@ where
         config,
     )?;
 
+    let public_values = all_proof.public_values;
+
+    // Extra products to add to the looked last value
+    // Arithmetic, KeccakSponge, Keccak, Logic
+    let mut extra_looking_products = vec![vec![F::ONE; config.num_challenges]; NUM_TABLES - 1];
+
+    // Memory
+    extra_looking_products.push(Vec::new());
+    for c in 0..config.num_challenges {
+        extra_looking_products[Table::Memory as usize].push(get_memory_extra_looking_products(
+            &public_values,
+            ctl_challenges.challenges[c],
+        ));
+    }
+
     verify_cross_table_lookups::<F, D>(
         cross_table_lookups,
         all_proof.stark_proofs.map(|p| p.proof.openings.ctl_zs_last),
+        extra_looking_products,
         config,
     )
+}
+
+/// Computes the extra product to multiply to the looked value. It contains memory operations not in the CPU trace:
+/// - block metadata writes before kernel bootstrapping,
+/// - trie roots writes before kernel bootstrapping.
+pub(crate) fn get_memory_extra_looking_products<F, const D: usize>(
+    public_values: &PublicValues,
+    challenge: GrandProductChallenge<F>,
+) -> F
+where
+    F: RichField + Extendable<D>,
+{
+    let mut prod = F::ONE;
+
+    // Add metadata and tries writes.
+    let fields = [
+        (
+            GlobalMetadata::BlockBeneficiary,
+            U256::from_big_endian(&public_values.block_metadata.block_beneficiary.0),
+        ),
+        (
+            GlobalMetadata::BlockTimestamp,
+            public_values.block_metadata.block_timestamp,
+        ),
+        (
+            GlobalMetadata::BlockNumber,
+            public_values.block_metadata.block_number,
+        ),
+        (
+            GlobalMetadata::BlockDifficulty,
+            public_values.block_metadata.block_difficulty,
+        ),
+        (
+            GlobalMetadata::BlockGasLimit,
+            public_values.block_metadata.block_gaslimit,
+        ),
+        (
+            GlobalMetadata::BlockChainId,
+            public_values.block_metadata.block_chain_id,
+        ),
+        (
+            GlobalMetadata::BlockBaseFee,
+            public_values.block_metadata.block_base_fee,
+        ),
+        (
+            GlobalMetadata::StateTrieRootDigestBefore,
+            h2u(public_values.trie_roots_before.state_root),
+        ),
+        (
+            GlobalMetadata::TransactionTrieRootDigestBefore,
+            h2u(public_values.trie_roots_before.transactions_root),
+        ),
+        (
+            GlobalMetadata::ReceiptTrieRootDigestBefore,
+            h2u(public_values.trie_roots_before.receipts_root),
+        ),
+        (
+            GlobalMetadata::StateTrieRootDigestAfter,
+            h2u(public_values.trie_roots_after.state_root),
+        ),
+        (
+            GlobalMetadata::TransactionTrieRootDigestAfter,
+            h2u(public_values.trie_roots_after.transactions_root),
+        ),
+        (
+            GlobalMetadata::ReceiptTrieRootDigestAfter,
+            h2u(public_values.trie_roots_after.receipts_root),
+        ),
+    ];
+    let is_read = F::ZERO;
+    let context = F::ZERO;
+    let segment = F::from_canonical_u32(Segment::GlobalMetadata as u32);
+    let timestamp = F::ONE;
+
+    let mut row = vec![F::ZERO; 13];
+    fields.map(|(field, val)| {
+        row[0] = is_read;
+        row[1] = context;
+        row[2] = segment;
+        row[3] = F::from_canonical_usize(field as usize);
+
+        for j in 0..VALUE_LIMBS {
+            row[j + 4] = F::from_canonical_u32((val >> (j * 32)).low_u32());
+        }
+        row[12] = timestamp;
+        prod *= challenge.combine(row.iter());
+    });
+
+    prod
 }
 
 pub(crate) fn verify_stark_proof_with_challenges<

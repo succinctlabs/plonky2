@@ -25,7 +25,17 @@ use crate::witness::memory::MemoryAddress;
 
 pub(crate) fn ctl_looked_data<F: Field>() -> Vec<Column<F>> {
     let cols = KECCAK_SPONGE_COL_MAP;
-    let outputs = Column::singles(&cols.updated_state_u32s[..8]);
+    let mut outputs = Vec::with_capacity(8);
+    for i in (0..8).rev() {
+        let cur_col = Column::linear_combination(
+            cols.updated_state_bytes[i * 4..(i + 1) * 4]
+                .iter()
+                .enumerate()
+                .map(|(j, &c)| (c, F::from_canonical_u64(1 << (24 - 8 * j)))),
+        );
+        outputs.push(cur_col);
+    }
+
     Column::singles([
         cols.context,
         cols.segment,
@@ -93,9 +103,7 @@ pub(crate) fn ctl_looking_logic<F: Field>(i: usize) -> Vec<Column<F>> {
     let cols = KECCAK_SPONGE_COL_MAP;
 
     let mut res = vec![
-        Column::zero(), // is_and
-        Column::zero(), // is_or
-        Column::one(),  // is_xor
+        Column::constant(F::from_canonical_u8(0x18)), // is_xor
     ];
 
     // Input 0 contains some of the sponge's original rate chunks. If this is the last CTL, we won't
@@ -137,7 +145,11 @@ pub(crate) fn ctl_looking_memory_filter<F: Field>(i: usize) -> Column<F> {
     // - this is a full input block, or
     // - this is a final block of length `i` or greater
     let cols = KECCAK_SPONGE_COL_MAP;
-    Column::sum(once(&cols.is_full_input_block).chain(&cols.is_final_input_len[i..]))
+    if i == KECCAK_RATE_BYTES - 1 {
+        Column::single(cols.is_full_input_block)
+    } else {
+        Column::sum(once(&cols.is_full_input_block).chain(&cols.is_final_input_len[i + 1..]))
+    }
 }
 
 /// CTL filter for looking at XORs in the logic table.
@@ -197,7 +209,11 @@ impl<F: RichField + Extendable<D>, const D: usize> KeccakSpongeStark<F, D> {
         operations: Vec<KeccakSpongeOp>,
         min_rows: usize,
     ) -> Vec<[F; NUM_KECCAK_SPONGE_COLUMNS]> {
-        let mut rows = vec![];
+        let base_len: usize = operations
+            .iter()
+            .map(|op| op.input.len() / KECCAK_RATE_BYTES + 1)
+            .sum();
+        let mut rows = Vec::with_capacity(base_len.max(min_rows).next_power_of_two());
         for op in operations {
             rows.extend(self.generate_rows_for_op(op));
         }
@@ -209,7 +225,7 @@ impl<F: RichField + Extendable<D>, const D: usize> KeccakSpongeStark<F, D> {
     }
 
     fn generate_rows_for_op(&self, op: KeccakSpongeOp) -> Vec<[F; NUM_KECCAK_SPONGE_COLUMNS]> {
-        let mut rows = vec![];
+        let mut rows = Vec::with_capacity(op.input.len() / KECCAK_RATE_BYTES + 1);
 
         let mut sponge_state = [0u32; KECCAK_WIDTH_U32S];
 
@@ -342,6 +358,23 @@ impl<F: RichField + Extendable<D>, const D: usize> KeccakSpongeStark<F, D> {
 
         keccakf_u32s(&mut sponge_state);
         row.updated_state_u32s = sponge_state.map(F::from_canonical_u32);
+        let is_final_block = row.is_final_input_len.iter().copied().sum::<F>() == F::ONE;
+        if is_final_block {
+            for (l, &elt) in row.updated_state_u32s[..8].iter().enumerate() {
+                let mut cur_elt = elt;
+                (0..4).for_each(|i| {
+                    row.updated_state_bytes[l * 4 + i] =
+                        F::from_canonical_u32((cur_elt.to_canonical_u64() & 0xFF) as u32);
+                    cur_elt = F::from_canonical_u64(cur_elt.to_canonical_u64() >> 8);
+                });
+
+                let mut s = row.updated_state_bytes[l * 4].to_canonical_u64();
+                for i in 1..4 {
+                    s += row.updated_state_bytes[l * 4 + i].to_canonical_u64() << (8 * i);
+                }
+                assert_eq!(elt, F::from_canonical_u64(s), "not equal");
+            }
+        }
     }
 
     fn generate_padding_row(&self) -> [F; NUM_KECCAK_SPONGE_COLUMNS] {
@@ -447,6 +480,16 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for KeccakSpongeS
         for (i, &is_final_len) in local_values.is_final_input_len.iter().enumerate() {
             let entry_match = offset - P::from(FE::from_canonical_usize(i));
             yield_constr.constraint(is_final_len * entry_match);
+        }
+
+        // Adding constraints for byte columns.
+        for (l, &elt) in local_values.updated_state_u32s[..8].iter().enumerate() {
+            let mut s = local_values.updated_state_bytes[l * 4];
+            for i in 1..4 {
+                s += local_values.updated_state_bytes[l * 4 + i]
+                    * P::from(FE::from_canonical_usize(1 << (8 * i)));
+            }
+            yield_constr.constraint(is_final_block * (s - elt));
         }
     }
 
@@ -570,6 +613,21 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for KeccakSpongeS
             let entry_match = builder.sub_extension(offset, index);
 
             let constraint = builder.mul_extension(is_final_len, entry_match);
+            yield_constr.constraint(builder, constraint);
+        }
+
+        // Adding constraints for byte columns.
+        for (l, &elt) in local_values.updated_state_u32s[..8].iter().enumerate() {
+            let mut s = local_values.updated_state_bytes[l * 4];
+            for i in 1..4 {
+                s = builder.mul_const_add_extension(
+                    F::from_canonical_usize(1 << (8 * i)),
+                    local_values.updated_state_bytes[l * 4 + i],
+                    s,
+                );
+            }
+            let constraint = builder.sub_extension(s, elt);
+            let constraint = builder.mul_extension(is_final_block, constraint);
             yield_constr.constraint(builder, constraint);
         }
     }
