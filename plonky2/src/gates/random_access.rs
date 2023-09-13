@@ -37,7 +37,7 @@ pub struct RandomAccessGate<F: RichField + Extendable<D>, const D: usize> {
     /// Leftover wires are used as global scratch space to store constants.
     pub num_extra_constants: usize,
 
-    _phantom: PhantomData<F>,
+    pub _phantom: PhantomData<F>,
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> RandomAccessGate<F, D> {
