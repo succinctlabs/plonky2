@@ -51,7 +51,7 @@ pub struct CosetInterpolationGate<F: RichField + Extendable<D>, const D: usize> 
     pub subgroup_bits: usize,
     pub degree: usize,
     pub barycentric_weights: Vec<F>,
-    _phantom: PhantomData<F>,
+    pub _phantom: PhantomData<F>,
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> CosetInterpolationGate<F, D> {

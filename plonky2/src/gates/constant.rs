@@ -23,7 +23,7 @@ use crate::util::serialization::{Buffer, IoResult, Read, Write};
 /// A gate which takes a single constant parameter and outputs that value.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct ConstantGate {
-    pub(crate) num_consts: usize,
+    pub num_consts: usize,
 }
 
 impl ConstantGate {
